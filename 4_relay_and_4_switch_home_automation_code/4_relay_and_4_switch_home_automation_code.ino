@@ -1,19 +1,23 @@
+#include <WiFiManager.h>        // WiFiManager by tzapu
+#include <WebServer.h>
 #include "HomeSpan.h"
 
-// Assign GPIO pins for relays and switches
-#define RELAY_1 2    // D2
-#define RELAY_2 4    // D4
-#define RELAY_3 18   // D18
-#define RELAY_4 19   // D19
+// Relay and switch pins
+#define RELAY_1 2
+#define RELAY_2 4
+#define RELAY_3 18
+#define RELAY_4 19
 
-#define SWITCH_1 26  // D26
-#define SWITCH_2 25  // D25
-#define SWITCH_3 33  // D33
-#define SWITCH_4 32  // D32
+#define SWITCH_1 26
+#define SWITCH_2 25
+#define SWITCH_3 33
+#define SWITCH_4 32
 
-// Debounce helper
 unsigned long lastDebounce[4] = {0, 0, 0, 0};
 bool lastState[4] = {HIGH, HIGH, HIGH, HIGH};
+
+SpanCharacteristic* powerChar[4];
+WebServer server(80);
 
 class Appliance : public Service::LightBulb {
   SpanCharacteristic *power;
@@ -28,36 +32,76 @@ public:
     index = i;
 
     pinMode(relayPin, OUTPUT);
-    digitalWrite(relayPin, HIGH);  // Relay OFF initially for active-low logic
+    digitalWrite(relayPin, HIGH);
 
     pinMode(switchPin, INPUT_PULLUP);
 
     power = new Characteristic::On();
+    powerChar[i] = power;
   }
 
   boolean update() override {
-    // Invert logic for active-low relay
     digitalWrite(relayPin, power->getNewVal() ? LOW : HIGH);
     return true;
   }
 
   void loop() override {
     bool current = digitalRead(switchPin);
-
-    // Toggle on any change (rocker switch)
     if (current != lastState[index] && millis() - lastDebounce[index] > 200) {
-      bool newState = !power->getVal();                    // Toggle HomeKit state
-      power->setVal(newState);                             // Update app
-      digitalWrite(relayPin, newState ? LOW : HIGH);       // Relay logic inverted
+      bool newState = !power->getVal();
+      power->setVal(newState);
+      digitalWrite(relayPin, newState ? LOW : HIGH);
       lastDebounce[index] = millis();
     }
-
     lastState[index] = current;
   }
 };
 
+void handleRelayControl(int index, bool state) {
+  if (index < 0 || index > 3 || !powerChar[index]) {
+    server.send(400, "text/plain", "Invalid relay");
+    return;
+  }
+
+  powerChar[index]->setVal(state);
+  digitalWrite((index == 0 ? RELAY_1 :
+               index == 1 ? RELAY_2 :
+               index == 2 ? RELAY_3 : RELAY_4), state ? LOW : HIGH);
+
+  server.send(200, "text/plain", String("Relay ") + (index + 1) + (state ? " ON" : " OFF"));
+}
+
+void setupRoutes() {
+  server.on("/relay/1/on", []() { handleRelayControl(0, true); });
+  server.on("/relay/1/off", []() { handleRelayControl(0, false); });
+  server.on("/relay/2/on", []() { handleRelayControl(1, true); });
+  server.on("/relay/2/off", []() { handleRelayControl(1, false); });
+  server.on("/relay/3/on", []() { handleRelayControl(2, true); });
+  server.on("/relay/3/off", []() { handleRelayControl(2, false); });
+  server.on("/relay/4/on", []() { handleRelayControl(3, true); });
+  server.on("/relay/4/off", []() { handleRelayControl(3, false); });
+
+  server.onNotFound([]() {
+    server.send(404, "text/plain", "Not found");
+  });
+}
+
 void setup() {
   Serial.begin(115200);
+
+  // WiFiManager for user-configurable WiFi setup
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180);  // Optional timeout
+  if (!wm.autoConnect("ESP32-Setup", "12345678")) {
+    Serial.println("Failed to connect. Restarting...");
+    ESP.restart();
+  }
+
+  Serial.print("Connected! IP address: ");
+  Serial.println(WiFi.localIP());
+
+  server.begin();
+  setupRoutes();
 
   homeSpan.setPairingCode("11112222");
   homeSpan.begin(Category::Lighting, "ESP32 Relay Board");
@@ -75,5 +119,6 @@ void setup() {
 }
 
 void loop() {
+  server.handleClient();
   homeSpan.poll();
 }
